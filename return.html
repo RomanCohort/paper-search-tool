@@ -1,0 +1,42 @@
+<html/header>
+    <meta charset="utf-8">
+    <title>反馈页面</title>
+    <label>请输入你的宝贵意见：</label>
+    <form id="wechatForm">
+    <div>
+        <label for="message">输入要发送的消息：</label>
+        <textarea id="message" name="message" required rows="4" cols="50"></textarea>
+    </div>
+    <div>
+        <label for="userOpenid">用户OpenID：</label>
+        <input type="text" id="userOpenid" name="openid" required>
+    </div>
+    <button type="submit">发送到微信</button>
+</form>
+
+<script>
+document.getElementById('wechatForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    
+    const formData = {
+        message: document.getElementById('message').value,
+        openid: document.getElementById('userOpenid').value
+    };
+    
+    // 发送到后端处理
+    fetch('/send-wechat-message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(formData)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if(data.success) {
+            alert('消息发送成功！');
+        } else {
+            alert('发送失败：' + data.error);
+        }
+    });
+});
+</script>
+	<br>
