@@ -317,8 +317,11 @@ def page_body(zh, api_base="", top=None):
         top = daily_block(zh)
     js = ASK_JS.replace('%HINT%', HINT_ZH if zh else HINT_EN)
     js = js.replace('%EXP%', EXP_ZH if zh else EXP_EN)
-    return (u'<script>window.API = %s;</script>\n' % (u"'" + api_base + u"'")
+    # **HTML 必须在脚本之前**：脚本按文档顺序执行，反过来跑的话
+    # document.getElementById('askform') 拿到 null，整段 JS 直接 return ——
+    # 勾选框和搜索框一起消失（线上就是这么坏的，浏览器缓存不是原因）。
+    return (page_block(zh, top)
+            + u'<script>window.API = %s;</script>\n' % (u"'" + api_base + u"'")
             + CORE_JS
             + js
-            + u'<script>(function(){ if (window.RCO) window.RCO.decorate(document); })();</script>\n'
-            + page_block(zh, top))
+            + u'<script>(function(){ if (window.RCO) window.RCO.decorate(document); })();</script>\n')
