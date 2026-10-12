@@ -30,12 +30,31 @@
 | Europe PMC | `europepmc` | 生物医学文献 + OA 全文 | ✅（有 PMC 编号的） |
 | OpenAlex | `openalex` | 全学科元数据 | ❌ 只给 DOI |
 | Crossref | `crossref` | 全学科元数据 | ❌ 只给 DOI |
+| DOAJ | `doaj` | 开放获取期刊目录（只收 OA） | ✅ |
 | RCSB PDB | `pdb` | 实验解析的结构 | ✅ `.pdb` 文件 |
 
 选取标准只有一条：**实测能从服务器直连拿到**。放弃的（bioRxiv 站点、Oxford Academic、
 IEEE Xplore、Zenodo、RNAcentral、Semantic Scholar 等）都是封数据中心 IP 或反爬挑战，
 这里**不写任何绕过**。ScienceDirect / IEEE / Oxford / Scopus 这类付费墙源只做元数据
 与外链。
+
+> 2026-10 补测：SciELO 403、HAL 超时、Zenodo 超时 → 不收；PubMed / bioRxiv API
+> 虽然通，但与 Europe PMC 高度重叠，加了只是多一份延迟，也没收。
+
+### 检索词：**两个词同时搜**
+
+模型把一句话转成 2-3 个不同角度的检索词，**并行**去搜再合并。这不是备选：
+实测只用第一个词会扔掉一半结果（5 个真实问法合计 126 条 → 239 条，+90%）。
+
+合并时的窗口配比是「主词 10 / 第二词 6 / 第三词 4」而不是平分 —— 平分试过，
+主词只占 5-6 条、第三个词又把噪声带进来，模型反而挑不出东西。
+
+### 开放获取位置（Unpaywall）
+
+只有 DOI 的那些结果（OpenAlex / Crossref / DOAJ）本来既没全文也没法中转。
+现在会用 **Unpaywall** 把 DOI 换成合法的开放获取位置（有缓存，30 天），
+于是这一批结果也能给出「开放获取全文」。实在没有 OA 副本的会**明确写「无开放获取」**，
+而不是让人以为页面坏了。
 
 ## 快速开始
 
@@ -64,6 +83,7 @@ uvicorn opensearch.app:app --host 127.0.0.1 --port 8000
 | GET | `/api/sources` | 可选数据库清单（前端勾选框的唯一来源） |
 | GET | `/api/asksearch?q=&sources=&client_id=` | 自然语言检索（本项目的主接口） |
 | GET | `/api/askexport?q=&sources=&format=` | 导出这次结果：`json` / `bibtex` / `ris` |
+| GET | `/api/outline?q=&sources=&format=` | 主题大纲（思维导图）：`json` / `md`（markmap）/ `xmind` |
 | GET | `/api/explain?arxiv_id=&title=&abstract=` | 讲一篇论文 |
 | GET | `/api/papers?q=&source=` | 纯关键词检索（不经过 LLM） |
 | GET | `/api/export?q=&format=&source=` | 导出关键词检索的结果 |
@@ -83,6 +103,16 @@ uvicorn opensearch.app:app --host 127.0.0.1 --port 8000
 `all` 是**完整列表**（页面按 10 条一页翻）；`picks` 是 `all` 里被挑中的下标，
 页面据此打星 —— 和 `say` 里的 `#0`、`#4` 是同一套编号（0 起）。
 `status` 里失败的源要如实展示，别假装没这回事。
+
+### 思维导图（`/api/outline`）
+
+多一次 LLM 调用（有缓存），把结果按**主题**聚类（不是按来源），返回
+`{summary, themes:[{name, note, ids}], rest, items}`。页面渲染成可折叠大纲，
+并可导出：
+
+- `.md` —— 标题层级就是树，markmap / Obsidian 之类直接渲染成脑图
+- `.xmind` —— 一个 zip（`content.json`），XMind 直接打开。老仓库里
+  「XMind 格式导出」那句一直没兑现，在这里补上
 
 ## 前端
 

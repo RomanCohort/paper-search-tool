@@ -32,6 +32,9 @@ window.RCO = (function () {
     var u = it.url || it.abs_url || '';
     var links = ['<a href="' + esc(u) + '">abs</a>'];
     if (it.pdf_url) links.push('<a href="' + esc(it.pdf_url) + '">' + esc(it.file_label || 'PDF') + '</a>');
+    else if (it.oa_url) links.push('<a href="' + esc(it.oa_url) + '">开放获取全文</a>');
+    // 没有开放获取副本时明说一句，别让人以为是页面坏了
+    else links.push('<span title="这篇没有开放获取副本（出版社那边要订阅），只能去 abs 页看" style="color:#999">无开放获取</span>');
     var abs = it.abstract
       ? '<details><summary class="meta">摘要</summary><p class="meta">' + esc(it.abstract) + '</p></details>' : '';
     return '<div class="item"><div class="when">' + esc((it.date || '').slice(0, 7)) + '</div><div>'
@@ -194,6 +197,7 @@ def page_block(zh, top=u""):
   <div id="asksay"></div>
   <div id="askexp" class="meta"></div>
   <div id="askres"></div>
+  <div id="askout"></div>
 </section>
 """ % (lead, how, src_line, REPO, REPO.split('//', 1)[1],
        top, dbt, mini_css, sel, ph, ph, inp_css, btn_css, btn)
@@ -225,6 +229,53 @@ ASK_JS = u"""
   }
   // 分页：一次给 10 条，能翻到全部（服务端最多带回 60 条）。
   var PAGE = 10, page = 1, LAST = null;
+  var LAST_TEXT = '', LAST_SRCS = [];
+
+  // 主题大纲（思维导图）：复用检索结果，只多一次 LLM 调用，之后有缓存
+  function loadOutline() {
+    var box = document.getElementById('askout');
+    if (!LAST_TEXT) { return; }
+    box.innerHTML = '<p class="meta">正在归纳主题…（一次模型调用，之后走缓存）</p>';
+    var qs = 'q=' + encodeURIComponent(LAST_TEXT)
+           + '&sources=' + encodeURIComponent(LAST_SRCS.join(','))
+           + '&client_id=' + encodeURIComponent(R.cid);
+    fetch('/api/outline?' + qs).then(function (r) { return r.json(); }).then(function (d) {
+      if (d.error) { box.innerHTML = '<p class="meta">' + R.esc(d.error) + '</p>'; return; }
+      var h = '<h3 style="font-size:1rem;margin:1rem 0 .3rem">主题大纲</h3>';
+      if (d.summary) { h += '<p>' + R.esc(d.summary) + '</p>'; }
+      function item_line(i) {
+        var it = (d.items || [])[i] || {};
+        var u = it.url || it.abs_url || '';
+        return '<li class="meta" style="margin:.15rem 0">#' + i + ' '
+             + '<a href="' + R.esc(u) + '">' + R.esc(it.title) + '</a> '
+             + '<span style="color:#999">' + R.esc(it.source_label || '') + '</span></li>';
+      }
+      h += '<ul class="plain" style="list-style:none;padding-left:0">';
+      (d.themes || []).forEach(function (th) {
+        h += '<li style="margin:.4rem 0"><details open><summary style="cursor:pointer">'
+           + R.esc(th.name) + ' <span class="meta">(' + (th.ids || []).length + ')</span>'
+           + '</summary>';
+        if (th.note) { h += '<p class="meta">' + R.esc(th.note) + '</p>'; }
+        h += '<ul style="margin:.2rem 0 .2rem 1rem">';
+        (th.ids || []).forEach(function (i) { h += item_line(i); });
+        h += '</ul></details></li>';
+      });
+      if ((d.rest || []).length) {
+        h += '<li><details><summary style="cursor:pointer">未归类 ('
+           + d.rest.length + ')</summary><ul style="margin:.2rem 0 .2rem 1rem">';
+        d.rest.forEach(function (i) { h += item_line(i); });
+        h += '</ul></details></li>';
+      }
+      h += '</ul>';
+      h += '<p class="meta">导出：<a href="/api/outline?' + qs + '&format=md">Markdown'
+         + '</a>（markmap 之类能直接渲染成脑图） · <a href="/api/outline?' + qs
+         + '&format=xmind">XMind</a>（XMind 直接打开）</p>';
+      box.innerHTML = h;
+      R.decorate(box);
+    }).catch(function (e) {
+      box.innerHTML = '<p class="meta">出错了：' + R.esc((e && e.message) || '请求失败') + '</p>';
+    });
+  }
   function show(d) {
     LAST = d;
     var all = d.all || [];
@@ -278,6 +329,8 @@ ASK_JS = u"""
     var srcs = picked();
     if (kw.length < 4) { msg.textContent = '多说几个字吧（至少 4 个字符）。'; return; }
     if (!srcs.length) { msg.textContent = '至少选一个数据库。'; return; }
+    LAST_TEXT = kw; LAST_SRCS = srcs;
+    document.getElementById('askout').innerHTML = '';
     msg.textContent = '%HINT%';
     say.innerHTML = ''; res.innerHTML = ''; exp.innerHTML = '';
     btn.disabled = true;
@@ -289,7 +342,11 @@ ASK_JS = u"""
         btn.disabled = false;
         if (d.error) { msg.textContent = d.error; return; }
         var bits = [];
-        if (d.queries && d.queries.length) bits.push('检索词：' + d.queries.join(' / '));
+        if ((d.terms || []).length) {
+          bits.push('检索词：' + d.terms.map(function (t) { return t.term + '(' + t.n + ')'; }).join(' / '));
+        } else if (d.queries && d.queries.length) {
+          bits.push('检索词：' + d.queries.join(' / '));
+        }
         if (d.cached) bits.push('缓存');
         var dead = R.deadList(d.status);
         if (dead.length) bits.push('本次未连上：' + dead.join(', '));
@@ -302,7 +359,10 @@ ASK_JS = u"""
         exp.innerHTML = '%EXP%：'
           + '<a href="' + base + 'bibtex">BibTeX</a> · '
           + '<a href="' + base + 'ris">RIS</a> · '
-          + '<a href="' + base + 'json">JSON</a>';
+          + '<a href="' + base + 'json">JSON</a> · '
+          + '<button type="button" id="askoutbtn" style="padding:.15rem .5rem;border:1px solid var(--rule);border-radius:5px;cursor:pointer;font:inherit;font-size:.85em">主题大纲</button>';
+        var ob = document.getElementById('askoutbtn');
+        if (ob) { ob.addEventListener('click', loadOutline); }
       })
       // 别把任何异常都说成「网络出错」——那会把页面自己的 JS 错误藏起来。
       .catch(function (e) {

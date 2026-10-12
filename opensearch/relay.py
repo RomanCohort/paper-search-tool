@@ -54,6 +54,11 @@ ALLOW = {
     "pmc.ncbi.nlm.nih.gov": (25 * MB, "pdf", "PMC"),
     "ncbi.nlm.nih.gov":     (25 * MB, "pdf", "NCBI"),
     "ebi.ac.uk":            (25 * MB, "pdf", "EBI"),
+    # 开放获取出版社（2026-10-12 从本机实测能直连取到 PDF）。
+    # 只收整站 OA 的：PLOS / Frontiers / BMC。MDPI 实测 403，不收。
+    "plos.org":             (25 * MB, "pdf", "PLOS"),
+    "frontiersin.org":      (25 * MB, "pdf", "Frontiers"),
+    "biomedcentral.com":    (25 * MB, "pdf", "BMC"),
     "rcsb.org":             (12 * MB, "pdb", "RCSB PDB"),
     "wwpdb.org":            (12 * MB, "pdb", "wwPDB"),
     "alphafold.ebi.ac.uk":  (12 * MB, "pdb", "AlphaFold DB"),

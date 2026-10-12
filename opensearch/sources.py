@@ -249,14 +249,6 @@ def pdb(kw):
         it["file_label"] = "PDB"          # 结构文件不是 PDF，标签得对
         out.append(it)
     return out
-ADAPTERS = {"arxiv": arxiv, "europepmc": europepmc,
-            "openalex": openalex, "crossref": crossref, "pdb": pdb}
-
-LABELS = {"arxiv": "arXiv", "europepmc": "Europe PMC",
-          "openalex": "OpenAlex", "crossref": "Crossref",
-          "pdb": "RCSB PDB"}
-
-
 def search_all(kw, sources=None):
     """并行扇出到各源。返回 (items, status)。
 
@@ -305,7 +297,15 @@ def search_all(kw, sources=None):
     items = []
     for n in names:
         items.extend(got.get(n) or [])
-    return _dedup(items), status
+    items = _dedup(items)
+    if items:
+        # 补开放获取位置：只对「没有全文、但有 DOI」的条目问 Unpaywall，
+        # 有缓存、有上限，整体最多多花一两秒（并行 + 12s 兜底）。
+        try:
+            enrich_oa(items)
+        except Exception:
+            pass
+    return items, status
 
 
 def _doi_of(it):
@@ -348,12 +348,146 @@ def _dedup(items):
     return out
 
 
+# ── 开放获取位置解析（Unpaywall）────────────────────────────────────
+# 为什么需要：arXiv / Europe PMC / PDB 之外的结果（OpenAlex、Crossref、DOAJ）
+# 只给 DOI，页面上就既没有全文也没有「中转下载」。Unpaywall 能把 DOI 换成
+# 合法的开放获取位置（0.7s 实测），于是这些条目也能给「开放获取全文」。
+# 只查有 DOI 且自己没有 pdf_url 的条目，并逐个缓存 30 天 —— 它的接口是免费的，
+# 但没必要反复问同一篇。
+OA_CACHE_DIR = os.environ.get("OA_CACHE_DIR", "/opt/arxiv-push/oa_cache")
+OA_EMAIL = os.environ.get("OA_EMAIL", "18806370529@163.com")
+OA_TTL_S = int(os.environ.get("OA_CACHE_TTL_DAYS", "30")) * 86400
+OA_LIMIT = int(os.environ.get("OA_LOOKUP_LIMIT", "24"))
+
+
+def _oa_cache_path(doi):
+    import hashlib
+    return os.path.join(OA_CACHE_DIR, hashlib.sha1(doi.encode("utf-8")).hexdigest()[:20] + ".json")
+
+
+def _oa_cached(doi):
+    try:
+        p = _oa_cache_path(doi)
+        if os.path.exists(p) and time.time() - os.path.getmtime(p) < OA_TTL_S:
+            with io.open(p, encoding="utf-8") as fh:
+                return json.load(fh)
+    except Exception:
+        pass
+    return None
+
+
+def _oa_put(doi, rec):
+    try:
+        if not os.path.isdir(OA_CACHE_DIR):
+            os.makedirs(OA_CACHE_DIR)
+        tmp = _oa_cache_path(doi) + ".tmp"
+        with io.open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False))
+        os.replace(tmp, _oa_cache_path(doi))
+    except Exception:
+        pass
+
+
+def _oa_lookup(doi):
+    """返回 {"oa_url": …, "host": "publisher|repository", "license": …} 或 None。"""
+    hit = _oa_cached(doi)
+    if hit is not None:
+        return hit or None
+    rec = {}
+    try:
+        url = ("https://api.unpaywall.org/v2/%s?email=%s"
+               % (urllib.parse.quote(doi), urllib.parse.quote(OA_EMAIL)))
+        d = _get(url, timeout=6)
+        loc = d.get("best_oa_location") or {}
+        if d.get("is_oa") and (loc.get("url_for_pdf") or loc.get("url")):
+            rec = {"oa_url": loc.get("url_for_pdf") or loc.get("url"),
+                   "host": loc.get("host_type") or "",
+                   "license": loc.get("license") or "",
+                   "version": loc.get("version") or ""}
+    except Exception:
+        return None                     # 失败不缓存，下次还可以再问
+    _oa_put(doi, rec)
+    return rec or None
+
+
+def enrich_oa(items, limit=OA_LIMIT):
+    """给缺全文的条目补上开放获取位置（原地改 item，加 oa_url/oa_host）。"""
+    import concurrent.futures as cf
+    todo = []
+    for it in items[:limit]:
+        if it.get("pdf_url") or it.get("oa_url"):
+            continue
+        doi = _doi_of(it)
+        if doi:
+            todo.append((it, doi))
+    if not todo:
+        return items
+    with cf.ThreadPoolExecutor(max_workers=min(8, len(todo))) as ex:
+        futs = {ex.submit(_oa_lookup, doi): it for it, doi in todo}
+        for fut in cf.as_completed(futs, timeout=12):
+            it = futs[fut]
+            try:
+                rec = fut.result()
+            except Exception:
+                continue
+            if rec and rec.get("oa_url"):
+                it["oa_url"] = rec["oa_url"]
+                it["oa_host"] = rec.get("host") or ""
+    return items
+
+
+# ── DOAJ（开放获取期刊目录；实测 0.27s，只收 OA 期刊）───────────────
+def doaj(kw):
+    q = urllib.parse.quote(kw)
+    d = _get("https://doaj.org/api/v2/search/articles/%s?pageSize=%d" % (q, PER_SOURCE))
+    out = []
+    for r in (d.get("results") or []):
+        b = r.get("bibjson") or {}
+        title = b.get("title") or ""
+        if not title:
+            continue
+        doi = ""
+        for ident in (b.get("identifier") or []):
+            if (ident.get("type") or "").lower() == "doi":
+                doi = ident.get("id") or ""
+                break
+        full = ""
+        for lk in (b.get("link") or []):
+            if (lk.get("type") or "").lower() == "fulltext" and lk.get("url"):
+                full = lk["url"]
+                break
+        url = full or (("https://doi.org/" + doi) if doi else "")
+        if not url:
+            continue
+        authors = ", ".join((a.get("name") or "").strip()
+                            for a in (b.get("author") or [])[:4])
+        journal = ((b.get("journal") or {}).get("title") or "")
+        it = _item("doaj", "DOAJ", doi or title[:40], title, authors,
+                   str(b.get("year") or ""), b.get("abstract") or "",
+                   url, full if full.lower().endswith(".pdf") else "")
+        if journal:
+            it["abstract"] = (journal + u" · " + (it.get("abstract") or ""))[:1600]
+        out.append(it)
+    return out
+
+
 # ── 导出格式（服务端拼字段，不依赖任何第三方）────────────────────────
+# 注册表放在文件末尾：这些名字只在**调用时**才被引用（search_all / server 那边），
+# 而适配器函数定义在上面 —— 放在中间的话，加了新适配器忘了调整顺序就会
+# NameError（刚才 doaj 就是这么炸的，import 都不给过）。
+ADAPTERS = {"arxiv": arxiv, "europepmc": europepmc, "openalex": openalex,
+            "crossref": crossref, "doaj": doaj, "pdb": pdb}
+
+LABELS = {"arxiv": "arXiv", "europepmc": "Europe PMC", "openalex": "OpenAlex",
+          "crossref": "Crossref", "doaj": "DOAJ", "pdb": "RCSB PDB"}
+
+
 def _btex(v):
     """BibTeX 字段值转义。反斜杠必须先转，否则会把后加的转义再转一遍。"""
     t = str(v or "")
-    for a, b in (("\\", "\textbackslash{}"), ("{", "\{"), ("}", "\}"),
-                 ("&", "\&"), ("%", "\%"), ("$", "\$"), ("#", "\#"), ("_", "\_")):
+    # 用 raw 字符串：不然 Python 会对每个 \X 报 SyntaxWarning（每次启动都刷屏）
+    for a, b in (("\\", r"\textbackslash{}"), ("{", r"\{"), ("}", r"\}"),
+                 ("&", r"\&"), ("%", r"\%"), ("$", r"\$"), ("#", r"\#"), ("_", r"\_")):
         t = t.replace(a, b)
     return re.sub(r"\s+", " ", t).strip()
 

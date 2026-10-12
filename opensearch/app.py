@@ -48,6 +48,43 @@ def index():
                           "/api/askexport", "/api/explain", "/api/dl", "/api/dl/allow"]}
 
 
+@app.get("/api/outline")
+async def api_outline(q: str = "", sources: str = "", format: str = "json",
+                      client_id: str = ""):
+    """主题大纲（思维导图）：复用检索结果，只多一次 LLM 调用。
+
+    format=json 给页面渲染；md / xmind 是下载 —— markmap 之类能直接把 .md
+    渲染成脑图，XMind 能直接打开 .xmind。
+    """
+    fmt = (format or "json").strip().lower()
+    if fmt not in ("json", "md", "xmind"):
+        raise HTTPException(status_code=400, detail="format 只能是 json / md / xmind。")
+    q = (q or "").strip()
+    if len(q) < 4:
+        return {"error": "多说几个字吧（至少 4 个字符）。"}
+    want = [x.strip() for x in (sources or "").split(",") if x.strip()]
+    bad = [x for x in want if x not in srcmod.ADAPTERS]
+    if bad:
+        return {"error": "不认识的数据库：%s" % ", ".join(bad[:6])}
+    try:
+        data = await asyncio.to_thread(askmod.outline, q, (client_id or "")[:64],
+                                       want or None)
+    except Exception as e:
+        logger.warning("[outline] 失败: %r" % (e,))
+        return {"error": "大纲暂时生成不了。"}
+    if fmt == "json" or data.get("error"):
+        return data
+    if fmt == "md":
+        body = askmod.outline_markdown(data)
+        mime, ext, blob = "text/markdown", "md", body.encode("utf-8")
+    else:
+        mime, ext, blob = ("application/vnd.xmind.workbook", "xmind",
+                           askmod.outline_xmind(data))
+    return Response(content=blob, media_type=mime,
+                    headers={"Content-Disposition":
+                             'attachment; filename="outline-%s.%s"' % (_stem(q), ext)})
+
+
 @app.get("/api/sources")
 def api_sources():
     """可选数据库清单 —— 前端勾选框用，只有这一份来源。"""
