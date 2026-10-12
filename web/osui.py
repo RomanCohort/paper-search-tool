@@ -26,6 +26,22 @@ window.RCO = (function () {
          + '<p class="meta">' + (it.source_label ? '<span class="tag">' + esc(it.source_label) + '</span> ' : '') + esc(it.authors) + '</p>'
          + '<p class="meta">' + links.join(' · ') + '</p></div></div>';
   }
+  // 一条结果（带序号、推荐标记、可展开的摘要）。序号和「管理员的话」里的
+  // #0/#4 是同一套编号 —— 都用 all 里的下标，所以 0 起。
+  function rowHtml(it, i, starred) {
+    var u = it.url || it.abs_url || '';
+    var links = ['<a href="' + esc(u) + '">abs</a>'];
+    if (it.pdf_url) links.push('<a href="' + esc(it.pdf_url) + '">' + esc(it.file_label || 'PDF') + '</a>');
+    var abs = it.abstract
+      ? '<details><summary class="meta">摘要</summary><p class="meta">' + esc(it.abstract) + '</p></details>' : '';
+    return '<div class="item"><div class="when">' + esc((it.date || '').slice(0, 7)) + '</div><div>'
+         + '<h3>' + (starred ? '<span title="管理员挑出来的" style="color:#c60">★</span> ' : '')
+         + '<span style="color:#999;font-size:.85em">#' + i + '</span> '
+         + '<a href="' + esc(u) + '">' + esc(it.title) + '</a></h3>'
+         + '<p class="meta">' + (it.source_label ? '<span class="tag">' + esc(it.source_label) + '</span> ' : '')
+         + esc(it.authors) + '</p>'
+         + '<p class="meta">' + links.join(' · ') + '</p>' + abs + '</div></div>';
+  }
   function deadList(status) {
     var out = [];
     if (status) { for (var k in status) { if (status[k] && !status[k].ok) out.push(k); } }
@@ -81,8 +97,48 @@ RELAY_ONLY = CORE_JS + u"""<script>
 """
 
 
-def page_block(zh):
-    """OpenSearch 页的正文档 —— 表单 + 结果区（数据库勾选框由 JS 填）。"""
+DAILY_JSON = '/opt/arxiv-push/daily.json'
+
+
+def daily_block(zh, path=None, keep=1):
+    """搜索框上端那条「每日文献」。
+
+    读站里那份 daily.json（读不到就返回空串 —— 仓库里那份自包含演示页
+    没有这个文件，依然要能跑）。这是用户要的排布：每日文献在搜索框之上。
+    """
+    import html as _h
+    import io as _io
+    import json as _json
+    try:
+        with _io.open(path or DAILY_JSON, encoding='utf-8') as fh:
+            items = (_json.load(fh).get('items') or [])[:keep]
+    except Exception:
+        return u''
+    if not items:
+        return u''
+    it = items[0]
+    title = _h.escape(str(it.get('title') or u'(无标题)'))
+    note = _h.escape(str((it.get('summary_zh') if zh else it.get('summary_en'))
+                         or it.get('summary_zh') or u'')[:240])
+    date = _h.escape(str(it.get('date') or ''))
+    return (u'<section id="daily-top" style="border-left:3px solid var(--rule);'
+            u'padding:.2rem 0 .2rem .8rem;margin:0 0 1.2rem">\n'
+            u'  <p class="meta" style="margin:0">%s</p>\n'
+            u'  <h3 style="margin:.2rem 0">%s</h3>\n'
+            u'  <p style="margin:.2rem 0">%s</p>\n'
+            u'  <p class="meta" style="margin:.2rem 0">%s · <a href="%s">%s</a></p>\n'
+            u'</section>\n'
+            % (u'每日文献 · 今天' if zh else u'Daily paper',
+               title, note, date,
+               u'/daily/' if zh else u'/daily/en/',
+               u'看全部 →' if zh else u'see all →'))
+
+
+def page_block(zh, top=u""):
+    """OpenSearch 页的正文档 —— 表单 + 结果区（数据库勾选框由 JS 填）。
+
+    top：塞在表单**上端**的内容（每日文献那块就是这么来的）。
+    """
     if zh:
         lead = (u'一句话说你要什么（中文就行），它去几个学术库里取数，'
                 u'再由本站的管理员挑出真正相关的那几条，并说明理由。')
@@ -120,6 +176,7 @@ def page_block(zh):
   <p class="lead">%s</p>
   <p class="meta">%s</p>
   <p class="meta">%s<a href="%s">%s</a></p>
+  %s
   <form id="askform" autocomplete="off">
     <div id="dbset" style="margin:.6rem 0">
       <span class="meta" style="margin-right:.4rem">%s</span>
@@ -136,7 +193,7 @@ def page_block(zh):
   <div id="askres"></div>
 </section>
 """ % (lead, how, src_line, REPO, REPO.split('//', 1)[1],
-       dbt, mini_css, sel, ph, ph, inp_css, btn_css, btn)
+       top, dbt, mini_css, sel, ph, ph, inp_css, btn_css, btn)
 
 
 # 页面上直接用的文案（生成时替换进下面的 %HINT% / %EXP%）
@@ -162,6 +219,37 @@ ASK_JS = u"""
     var out = [];
     db.querySelectorAll('input[type=checkbox]').forEach(function (c) { if (c.checked) out.push(c.value); });
     return out;
+  }
+  // 分页：一次给 10 条，能翻到全部（服务端最多带回 60 条）。
+  var PAGE = 10, page = 1, LAST = null;
+  function show(d) {
+    LAST = d;
+    var all = d.all || [];
+    var total = d.total || all.length;
+    var star = {};
+    (d.picks || []).forEach(function (i) { star[i] = 1; });
+    var pages = Math.max(1, Math.ceil(all.length / PAGE));
+    if (page > pages) page = pages;
+    if (page < 1) page = 1;
+    var html = '';
+    if (!all.length) {
+      html = '<p class="meta">它这次没翻到结果。</p>';
+    } else {
+      var from = (page - 1) * PAGE;
+      all.slice(from, from + PAGE).forEach(function (it, k) {
+        html += R.rowHtml(it, from + k, star[from + k]);
+      });
+      html += '<p class="meta">共 ' + total + ' 条'
+            + (all.length < total ? '（带回前 ' + all.length + ' 条）' : '')
+            + ' · 第 ' + page + ' / ' + pages + ' 页 '
+            + '<button type="button" id="askprev"' + (page <= 1 ? ' disabled' : '') + '>上一页</button> '
+            + '<button type="button" id="asknext"' + (page >= pages ? ' disabled' : '') + '>下一页</button></p>';
+    }
+    res.innerHTML = html;
+    var pb = document.getElementById('askprev'), nb = document.getElementById('asknext');
+    if (pb) pb.addEventListener('click', function () { page -= 1; show(LAST); });
+    if (nb) nb.addEventListener('click', function () { page += 1; show(LAST); });
+    R.decorate(res);
   }
   // 数据库清单只从 /api/sources 来，页面里不写死
   fetch(API + '/api/sources').then(function (r) { return r.json(); }).then(function (d) {
@@ -204,15 +292,8 @@ ASK_JS = u"""
         if (dead.length) bits.push('本次未连上：' + dead.join(', '));
         msg.textContent = bits.join('｜');
         say.innerHTML = d.say ? '<blockquote>' + R.esc(d.say) + '</blockquote>' : '';
-        var html = '';
-        (d.items || []).forEach(function (it) { html += R.itemHtml(it); });
-        if (!html) {
-          var all = d.all || [];
-          html = '<p class="meta">没挑出特别贴的，下面是它翻到的（前 ' + all.length + ' 条）。</p>';
-          all.forEach(function (it) { html += R.itemHtml(it); });
-        }
-        res.innerHTML = html;
-        R.decorate(res);
+        page = 1;
+        show(d);
         // 导出走同一份缓存，不会再打一次第三方
         var base = API + '/api/askexport?' + qs + '&format=';
         exp.innerHTML = '%EXP%：'
@@ -227,12 +308,17 @@ ASK_JS = u"""
 """
 
 
-def page_body(zh, api_base=""):
-    """整块页面内容（表单 + JS）。api_base 留空 = 同域（站上就是这么用的）。"""
+def page_body(zh, api_base="", top=None):
+    """整块页面内容（表单 + JS）。api_base 留空 = 同域（站上就是这么用的）。
+
+    top 默认取站里的每日文献（仓库里那份演示页没有 daily.json，自动为空）。
+    """
+    if top is None:
+        top = daily_block(zh)
     js = ASK_JS.replace('%HINT%', HINT_ZH if zh else HINT_EN)
     js = js.replace('%EXP%', EXP_ZH if zh else EXP_EN)
     return (u'<script>window.API = %s;</script>\n' % (u"'" + api_base + u"'")
             + CORE_JS
             + js
             + u'<script>(function(){ if (window.RCO) window.RCO.decorate(document); })();</script>\n'
-            + page_block(zh))
+            + page_block(zh, top))

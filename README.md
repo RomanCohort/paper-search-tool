@@ -70,6 +70,20 @@ uvicorn opensearch.app:app --host 127.0.0.1 --port 8000
 | GET | `/api/dl?u=` | 开放获取的中转下载（白名单内） |
 | GET | `/api/dl/allow` | 中转白名单 |
 
+`/api/asksearch` 的返回：
+
+```json
+{"say": "…管理员挑完说的一句…", "items": ["…挑出来的几条…"],
+ "all": ["…它翻到的全部（上限 60 条）…"], "picks": [0, 3, 5],
+ "total": 47, "sources": ["arxiv", "pdb"], "queries": ["…检索词…"],
+ "status": {"arxiv": {"ok": true, "n": 8}, "europepmc": {"ok": false}},
+ "cached": false}
+```
+
+`all` 是**完整列表**（页面按 10 条一页翻）；`picks` 是 `all` 里被挑中的下标，
+页面据此打星 —— 和 `say` 里的 `#0`、`#4` 是同一套编号（0 起）。
+`status` 里失败的源要如实展示，别假装没这回事。
+
 ## 前端
 
 `web/` 里是那一页的前端代码：
@@ -81,6 +95,9 @@ uvicorn opensearch.app:app --host 127.0.0.1 --port 8000
 ```bash
 python web/standalone.py --api http://127.0.0.1:8000 > opensearch.html
 ```
+
+线上那一页还会在搜索框**上端**插一条「每日文献」（`osui.daily_block`，读站里
+`daily.json`）；仓库里没有那个文件，这一块自动为空，`standalone.py` 也显式关掉。
 
 ## 抗打与护栏
 

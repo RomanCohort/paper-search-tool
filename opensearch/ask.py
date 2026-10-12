@@ -35,7 +35,11 @@ CACHE_DIR = os.environ.get("ASKSEARCH_CACHE_DIR",
 MIN_GAP_S = float(os.environ.get("ASKSEARCH_MIN_GAP_S", "10"))
 DAILY_CAP = int(os.environ.get("ASKSEARCH_DAILY_CAP", "15"))
 MAX_Q = 200
+# MAX_ITEMS 是**给模型看的窗口**（提示词预算）；MAX_ALL 是**返回给页面的条数**。
+# 页面要能翻页看到全部（「结果展示要完整」），所以别再把 all 砍成 12 条 ——
+# 那会让翻页无从谈起，导出也跟着少一半。
 MAX_ITEMS = 12
+MAX_ALL = int(os.environ.get("ASKSEARCH_MAX_ALL", "60"))
 MAX_SAY = 700
 
 _SYS1 = """你是一个学术检索助手。把用户的自然语言需求转成 1-2 个检索词。
@@ -217,13 +221,15 @@ def ask(q, client_id="", sources=None):
 
     if not items:
         v = {"say": "本小姐搜了，这批里没有合适的。换个说法？", "items": [], "all": [],
+             "picks": [], "total": 0,
              "status": status, "queries": qs, "sources": srcs, "cached": False}
         _cache_put(ckey, {kk: vv for kk, vv in v.items() if kk != "cached"})
         return v
 
     if not say:
         say = "本小姐把结果列在下面了，自己挑一下。"
-    v = {"say": say, "items": [items[i] for i in pick_idx], "all": items[:MAX_ITEMS],
+    v = {"say": say, "items": [items[i] for i in pick_idx],
+         "all": items[:MAX_ALL], "picks": pick_idx, "total": len(items),
          "status": status, "queries": qs, "sources": srcs, "cached": False}
     _cache_put(ckey, {kk: vv for kk, vv in v.items() if kk != "cached"})
     return v

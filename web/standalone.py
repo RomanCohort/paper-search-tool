@@ -56,7 +56,8 @@ def main():
     a = ap.parse_args()
     sys.stdout.write(TPL % {'lang': 'zh-CN' if a.lang == 'zh' else 'en',
                             'repo': osui.REPO,
-                            'body': osui.page_body(a.lang == 'zh', a.api)})
+                            # top='' ：不看站里的 daily.json，纯工具页
+                            'body': osui.page_body(a.lang == 'zh', a.api, top=u'')})
     return 0
 
 
