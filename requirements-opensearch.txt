@@ -1,0 +1,3 @@
+# OpenSearch 后端用到的（其余全是标准库：urllib / json / threading）
+fastapi>=0.110
+uvicorn>=0.29
