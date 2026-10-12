@@ -19,6 +19,7 @@ import io
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -82,14 +83,49 @@ def _item(source, label, sid, title, authors, date, abstract, url, pdf=""):
 
 
 # ── arXiv（Fastly，SG 附近有 PoP；开放获取）──────────────────────────────
+_ax_lock = threading.Lock()
+_ax_last = [0.0]
+ARXIV_MIN_GAP_S = float(os.environ.get("ARXIV_MIN_GAP_S", "3"))
+ARXIV_COOLDOWN_S = float(os.environ.get("ARXIV_COOLDOWN_S", "900"))
+_ax_breaker = {"fails": 0, "until": 0.0}
+
+
+def _arxiv_gate():
+    """arXiv 的 API 明确要求「每 3 秒最多 1 次」。
+
+    多词并搜把请求数翻了 3 倍之后，实测被 Fastly 限流：本地出口直接 429，
+    服务器侧表现为「响应头秒回、正文卡死」—— arXiv 那一栏于是整块空掉。
+    所以这里做全局限流，并且（见 paper_ask）**只有主检索词会去查 arXiv**。
+    """
+    with _ax_lock:
+        gap = ARXIV_MIN_GAP_S - (time.time() - _ax_last[0])
+        if gap > 0:
+            time.sleep(min(gap, ARXIV_MIN_GAP_S))
+        _ax_last[0] = time.time()
+
+
 def arxiv(kw):
+    if time.time() < _ax_breaker["until"]:
+        # 熔断中：arXiv 那边在限流/堵塞（测量：新出口都吃 429，本机表现为
+        # 响应头都不回）。继续每问都撞它，只会既慢又更招人烦。
+        raise RuntimeError("arXiv 冷却中（%d 秒后自动重试）"
+                           % int(_ax_breaker["until"] - time.time()))
     q = urllib.parse.urlencode({"search_query": "all:%s" % kw, "start": 0,
                                 "max_results": PER_SOURCE, "sortBy": "relevance",
                                 "sortOrder": "descending"})
-    with urllib.request.urlopen(
-            urllib.request.Request("http://export.arxiv.org/api/query?" + q,
-                                   headers={"User-Agent": UA}), timeout=TIMEOUT) as r:
-        xml = r.read().decode("utf-8", "replace")
+    _arxiv_gate()
+    try:
+        with urllib.request.urlopen(
+                # 走 https：http 那个会先 301 一次，白多一个来回
+                urllib.request.Request("https://export.arxiv.org/api/query?" + q,
+                                       headers={"User-Agent": UA}), timeout=TIMEOUT) as r:
+            xml = r.read().decode("utf-8", "replace")
+    except Exception:
+        _ax_breaker["fails"] += 1
+        if _ax_breaker["fails"] >= 3:
+            _ax_breaker["until"] = time.time() + ARXIV_COOLDOWN_S
+        raise
+    _ax_breaker["fails"] = 0
     out = []
     for m in re.finditer(r"<entry>(.*?)</entry>", xml, re.S):
         e = m.group(1)
@@ -131,6 +167,7 @@ def europepmc(kw):
         # 只有明确开放获取、且有 PMC 编号的才给 PDF 直链
         if pmcid and str(it.get("isOpenAccess") or "").upper() == "Y":
             pdf = "https://europepmc.org/articles/%s?pdf=render" % pmcid
+            oa_verify(pdf)
         out.append(_item("europepmc", "Europe PMC", pmid or pmcid or doi,
                          it.get("title"), it.get("authorString"),
                          it.get("firstPublicationDate"), it.get("abstractText"),
@@ -156,10 +193,15 @@ def openalex(kw):
         auth = ", ".join((a.get("author") or {}).get("display_name", "")
                          for a in (it.get("authorships") or [])[:4])
         oa = it.get("open_access") or {}
-        out.append(_item("openalex", "OpenAlex", it.get("id", "").rsplit("/", 1)[-1],
-                         it.get("title"), auth, it.get("publication_date"), abs_txt,
-                         it.get("doi") or it.get("id") or "",
-                         oa.get("oa_url") or ""))
+        row = _item("openalex", "OpenAlex", it.get("id", "").rsplit("/", 1)[-1],
+                    it.get("title"), auth, it.get("publication_date"), abs_txt,
+                    it.get("doi") or it.get("id") or "",
+                    oa.get("oa_url") or "")
+        # OpenAlex 的 open_access.oa_url 按定义就是开放获取位置（常常落在
+        # sciengine / front-sci 这类平台上），记下来让中转也认它。
+        if row.get("pdf_url"):
+            oa_verify(row["pdf_url"])
+        out.append(row)
     return out
 
 
@@ -359,6 +401,72 @@ OA_EMAIL = os.environ.get("OA_EMAIL", "18806370529@163.com")
 OA_TTL_S = int(os.environ.get("OA_CACHE_TTL_DAYS", "30")) * 86400
 OA_LIMIT = int(os.environ.get("OA_LOOKUP_LIMIT", "24"))
 
+# 开放获取「已验证 URL」集合：凡是我们从**只给开放获取位置**的接口
+# （OpenAlex 的 open_access.oa_url、Europe PMC 的 isOpenAccess=Y 全文、
+# DOAJ 的 fulltext、Unpaywall 的 oa_url）拿到的链接，都记在这里。
+# 中转白名单因此不再需要手写出版社域名 —— 实测的问题就出在这：OpenAlex
+# 给的是 sciengine.com / front-sci.com 这类平台，手写白名单根本追不上，
+# 于是「只有前几条（arXiv）有中转按钮」。
+OA_VERIFIED_FILE = os.environ.get("OA_VERIFIED_FILE", "/opt/arxiv-push/oa_verified.json")
+OA_VERIFIED_MAX = int(os.environ.get("OA_VERIFIED_MAX", "20000"))
+_vlock = threading.Lock()
+_vload = [False]
+_vset = {}
+
+
+def _vload_now():
+    if _vload[0]:
+        return
+    _vload[0] = True
+    try:
+        with io.open(OA_VERIFIED_FILE, encoding="utf-8") as fh:
+            d = json.load(fh)
+        if isinstance(d, dict):
+            _vset.update(d)
+    except Exception:
+        pass
+
+
+def _vsave():
+    try:
+        d = os.path.dirname(OA_VERIFIED_FILE)
+        if d and not os.path.isdir(d):
+            os.makedirs(d)
+        tmp = OA_VERIFIED_FILE + ".tmp"
+        with io.open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(_vset))
+        os.replace(tmp, OA_VERIFIED_FILE)
+    except Exception:
+        pass
+
+
+def oa_verify(url):
+    """把「确认是开放获取」的 URL 记下来（中转那边据此放行）。"""
+    if not url or not url.lower().startswith("http"):
+        return
+    import hashlib
+    h = hashlib.sha1(url.strip().encode("utf-8")).hexdigest()[:20]
+    now = time.time()
+    with _vlock:
+        _vload_now()
+        if h in _vset:
+            return
+        _vset[h] = {"url": url.strip()[:600], "ts": now}
+        if len(_vset) > OA_VERIFIED_MAX:        # 超了先扔最老的
+            for k in sorted(_vset, key=lambda x: _vset[x].get("ts", 0))[:len(_vset) - OA_VERIFIED_MAX]:
+                _vset.pop(k, None)
+        _vsave()
+
+
+def oa_is_verified(url):
+    if not url:
+        return False
+    import hashlib
+    h = hashlib.sha1(url.strip().encode("utf-8")).hexdigest()[:20]
+    with _vlock:
+        _vload_now()
+        return h in _vset
+
 
 def _oa_cache_path(doi):
     import hashlib
@@ -433,6 +541,7 @@ def enrich_oa(items, limit=OA_LIMIT):
             if rec and rec.get("oa_url"):
                 it["oa_url"] = rec["oa_url"]
                 it["oa_host"] = rec.get("host") or ""
+                oa_verify(rec["oa_url"])
     return items
 
 
@@ -465,9 +574,66 @@ def doaj(kw):
         it = _item("doaj", "DOAJ", doi or title[:40], title, authors,
                    str(b.get("year") or ""), b.get("abstract") or "",
                    url, full if full.lower().endswith(".pdf") else "")
+        # DOAJ 只收开放获取期刊，它给的 fulltext 链接就是 OA 位置
+        if full:
+            oa_verify(full)
         if journal:
             it["abstract"] = (journal + u" · " + (it.get("abstract") or ""))[:1600]
         out.append(it)
+    return out
+
+
+# ── PubMed（NCBI E-utilities；实测 0.34s，比 EBI 稳）────────────────
+def pubmed(kw):
+    """esearch 找 PMID，再 efetch 取摘要（XML，标准库解析）。
+
+    为什么在有了 Europe PMC 之后还要它：两者语料重叠，但**可达性不一样** ——
+    实测同一时间点，EBI 那侧三次查询全部握手超时（0 条），PubMed 三次都稳。
+    多这一条，Europe PMC 抽风时生物医学这部分不至于整块消失。
+    """
+    import xml.etree.ElementTree as ET
+    q = urllib.parse.urlencode({"db": "pubmed", "term": kw, "retmode": "json",
+                                "retmax": PER_SOURCE, "sort": "relevance"})
+    d = _get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + q)
+    ids = [str(x) for x in ((d.get("esearchresult") or {}).get("idlist") or [])]
+    if not ids:
+        return []
+    q2 = urllib.parse.urlencode({"db": "pubmed", "id": ",".join(ids),
+                                 "retmode": "xml", "rettype": "abstract"})
+    req = urllib.request.Request(
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?" + q2,
+        headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        xml_text = r.read().decode("utf-8", "replace")
+    out = []
+    try:
+        root = ET.fromstring(xml_text)
+    except Exception:
+        return []
+    for art in root.iter("PubmedArticle"):
+        def txt(node):
+            return _clean("".join(node.itertext())) if node is not None else ""
+        pmid = txt(art.find(".//PMID"))
+        title = txt(art.find(".//ArticleTitle"))
+        if not title:
+            continue
+        abst = _clean(" ".join("".join(a.itertext()) for a in art.iter("AbstractText")))
+        doi = ""
+        for aid in art.iter("ArticleId"):
+            if (aid.get("IdType") or "") == "doi":
+                doi = (aid.text or "").strip()
+        names = []
+        for a in art.iter("Author"):
+            ln, fn = txt(a.find("LastName")), txt(a.find("ForeName"))
+            if ln:
+                names.append((fn + " " + ln).strip())
+        year = txt(art.find(".//PubDate/Year")) or txt(art.find(".//ArticleDate/Year"))
+        url = (("https://doi.org/" + doi) if doi
+               else ("https://pubmed.ncbi.nlm.nih.gov/%s/" % pmid))
+        out.append(_item("pubmed", "PubMed", pmid or doi, title,
+                         ", ".join(names[:4]), year, abst, url, ""))
+        if len(out) >= PER_SOURCE:
+            break
     return out
 
 
@@ -475,11 +641,12 @@ def doaj(kw):
 # 注册表放在文件末尾：这些名字只在**调用时**才被引用（search_all / server 那边），
 # 而适配器函数定义在上面 —— 放在中间的话，加了新适配器忘了调整顺序就会
 # NameError（刚才 doaj 就是这么炸的，import 都不给过）。
-ADAPTERS = {"arxiv": arxiv, "europepmc": europepmc, "openalex": openalex,
-            "crossref": crossref, "doaj": doaj, "pdb": pdb}
+ADAPTERS = {"arxiv": arxiv, "europepmc": europepmc, "pubmed": pubmed,
+            "openalex": openalex, "crossref": crossref, "doaj": doaj, "pdb": pdb}
 
-LABELS = {"arxiv": "arXiv", "europepmc": "Europe PMC", "openalex": "OpenAlex",
-          "crossref": "Crossref", "doaj": "DOAJ", "pdb": "RCSB PDB"}
+LABELS = {"arxiv": "arXiv", "europepmc": "Europe PMC", "pubmed": "PubMed",
+          "openalex": "OpenAlex", "crossref": "Crossref", "doaj": "DOAJ",
+          "pdb": "RCSB PDB"}
 
 
 def _btex(v):

@@ -210,7 +210,13 @@ def _search_terms(srcmod, qs, srcs):
     import concurrent.futures as cf
     res = {}
     with cf.ThreadPoolExecutor(max_workers=max(1, len(qs))) as ex:
-        futs = {ex.submit(srcmod.search_all, t, srcs or None): t for t in qs}
+        futs = {}
+        for i, t in enumerate(qs):
+            # arXiv 只查主检索词：它的 API 要求每 3 秒最多 1 次，多词并搜会
+            # 把我们打成 429/正文卡死（实测）。其余源照常吃全部检索词。
+            use = [s for s in (srcs or list(srcmod.ADAPTERS))
+                   if not (i > 0 and s == "arxiv")]
+            futs[ex.submit(srcmod.search_all, t, use)] = t
         try:
             for fut in cf.as_completed(futs, timeout=45):
                 t = futs[fut]
@@ -227,7 +233,10 @@ def _search_terms(srcmod, qs, srcs):
         per_term.append({"term": t, "n": len(items_t)})
         for k, v in (st_t or {}).items():
             if k in status:
-                status[k] = {"ok": bool(status[k].get("ok")) and bool(v.get("ok")),
+                # 多个检索词各查一遍同一个源：**有一个词成功就算连上了**
+                # （用 and 的话，三词里挂一个就会把整源标成「本次未连上」，
+                # 可它明明拿回了十几条 —— 实测踩到）。
+                status[k] = {"ok": bool(status[k].get("ok")) or bool(v.get("ok")),
                              "n": (status[k].get("n") or 0) + (v.get("n") or 0),
                              "ms": max(status[k].get("ms") or 0, v.get("ms") or 0)}
             else:

@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.1] - 2026-10-12
+
+### Added
+- **PubMed** 数据源（NCBI E-utilities）。不是为了"不重复"——实测同一时间点
+  Europe PMC 三次查询全部握手超时（0 条），PubMed 三次都稳（0.34s、8 条）。
+  语料重叠但**可达性不同**，多这一条生物医学那块才不至于整块消失
+
+### Fixed
+- **中转按钮只有前几条有**（真 bug）：OpenAlex 给的开放获取 PDF 落在
+  sciengine / front-sci 这类平台上，手写白名单追不上 → 只有 arXiv 那几条能中转。
+  改成「凡是我们从只给开放获取位置的接口（OpenAlex oa_url / Europe PMC OA 全文 /
+  DOAJ / Unpaywall）拿到的 URL 都允许中转」，覆盖 8/23 → 17/23
+- 中转按钮只挂在**文件链接**上：以前 abs 页面也挂，点了会去下 HTML 再被拒
+- 中转改成**先校验再返回**：以前进了流式响应才发现不是 PDF，客户端只拿到 0 字节的 200
+- 多检索词时源状态合并写成了「有一个词失败就算整源未连上」，明明拿回十几条也报未连上
+- **arXiv 被自己打限流了**：它的 API 要求每 3 秒最多 1 次，多词并搜把请求翻了 3 倍 →
+  实测 429 / 正文卡死。现在：走 https（省一次 301）、全局 3 秒闸、**只有主检索词查 arXiv**、
+  连续失败 3 次进 15 分钟熔断
+
 ## [1.2.0] - 2026-10-12
 
 ### Added

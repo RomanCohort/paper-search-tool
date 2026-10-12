@@ -28,6 +28,7 @@
 |---|---|---|---|
 | arXiv | `arxiv` | 预印本 | ✅ |
 | Europe PMC | `europepmc` | 生物医学文献 + OA 全文 | ✅（有 PMC 编号的） |
+| PubMed | `pubmed` | 生物医学文献（NCBI E-utilities） | ❌ 只给 DOI（再用 Unpaywall 找 OA） |
 | OpenAlex | `openalex` | 全学科元数据 | ❌ 只给 DOI |
 | Crossref | `crossref` | 全学科元数据 | ❌ 只给 DOI |
 | DOAJ | `doaj` | 开放获取期刊目录（只收 OA） | ✅ |
@@ -40,6 +41,24 @@ IEEE Xplore、Zenodo、RNAcentral、Semantic Scholar 等）都是封数据中心
 
 > 2026-10 补测：SciELO 403、HAL 超时、Zenodo 超时 → 不收；PubMed / bioRxiv API
 > 虽然通，但与 Europe PMC 高度重叠，加了只是多一份延迟，也没收。
+>
+> 补测更正（同日稍后）：**PubMed 收了** —— 重叠归重叠，可达性不一样：
+> 同一时间点 Europe PMC 三次查询全部握手超时（0 条），PubMed 三次都稳（0.34s、8 条）。
+> **bioRxiv 仍然不收**：它的 API 只接受日期区间、不支持关键词
+> （`/details/biorxiv/circRNA/0` 直接回 "Both dates must be in yyyy-mm-dd format"），
+> 只能按天翻页再本地过滤，不现实；它的预印本 Europe PMC 会用 `SRC:PPR` 收进来。
+
+### 中转下载覆盖哪些
+
+**两个列表不是一回事**，别混：
+
+* **搜索源**（页面上那排勾选框，`/api/sources`）：arXiv / Europe PMC / PubMed / OpenAlex / Crossref / DOAJ / RCSB PDB
+* **中转目标**（`/api/dl/allow` + 开放获取校验集）：arXiv / Europe PMC / PMC / NCBI / EBI /
+  RCSB PDB / wwPDB / AlphaFold DB / UniProt，外加 **PLOS / Frontiers / BMC**，
+  以及**我们自己从只给开放获取位置的接口拿到过的 URL**（OpenAlex 的 `oa_url`、
+  Europe PMC 的 OA 全文、DOAJ 的 fulltext、Unpaywall 的结果）
+
+没有开放获取副本的条目，页面上会直接写「无开放获取」，而不是给一个点了会报错的按钮。
 
 ### 检索词：**两个词同时搜**
 

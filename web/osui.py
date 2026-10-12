@@ -31,8 +31,10 @@ window.RCO = (function () {
   function rowHtml(it, i, starred) {
     var u = it.url || it.abs_url || '';
     var links = ['<a href="' + esc(u) + '">abs</a>'];
-    if (it.pdf_url) links.push('<a href="' + esc(it.pdf_url) + '">' + esc(it.file_label || 'PDF') + '</a>');
-    else if (it.oa_url) links.push('<a href="' + esc(it.oa_url) + '">开放获取全文</a>');
+    // data-dl 标记「这是文件链接」：中转按钮只挂在这种链接上 ——
+    // 挂在 abs 页面上会去下 HTML，然后被 %PDF 校验拒掉（点了报错）。
+    if (it.pdf_url) links.push('<a data-dl="1" href="' + esc(it.pdf_url) + '">' + esc(it.file_label || 'PDF') + '</a>');
+    else if (it.oa_url) links.push('<a data-dl="1" href="' + esc(it.oa_url) + '">开放获取全文</a>');
     // 没有开放获取副本时明说一句，别让人以为是页面坏了
     else links.push('<span title="这篇没有开放获取副本（出版社那边要订阅），只能去 abs 页看" style="color:#999">无开放获取</span>');
     var abs = it.abstract
@@ -68,7 +70,12 @@ window.RCO = (function () {
   function decorate(scope) {
     withAllow(function (list) {
       if (!list.length) return;
-      var as = (scope || document).querySelectorAll('a[href]');
+      var root = scope || document;
+      var as = root.querySelectorAll('a[data-dl]');
+      if (!as.length) {
+        // 手写/服务端渲染的老页面没带标记：退回按「像文件的链接」判断
+        as = root.querySelectorAll("a[href$='.pdf'], a[href$='.pdb'], a[href$='.cif']");
+      }
       Array.prototype.forEach.call(as, function (a) {
         if (a.getAttribute('data-relay') === '1') return;
         var h;
@@ -193,6 +200,9 @@ def page_block(zh, top=u""):
       <button type="submit" id="askbtn" style="%s">%s</button>
     </div>
   </form>
+  <p class="meta">中转下载：对<b>开放获取</b>的链接可用（arXiv / Europe PMC / PMC / RCSB PDB /
+    UniProt / PLOS / Frontiers / BMC，以及 OpenAlex 与 Unpaywall 给出的开放获取位置）。
+    没有开放获取副本的条目只能看摘要页 —— 页面上会直接标出来。</p>
   <p class="meta" id="askmsg"></p>
   <div id="asksay"></div>
   <div id="askexp" class="meta"></div>

@@ -116,7 +116,18 @@ def resolve(u):
             if hit is None or len(suf) > len(hit[0]):
                 hit = (suf, cfg)
     if hit is None:
-        raise DlError("这个域名不在开放获取白名单里，本站不代取。", 403)
+        # 白名单是手写的，追不上开放获取平台的长尾（实测：OpenAlex 给的
+        # 开放获取 PDF 落在 sciengine.com / front-sci.com 这类域名上，
+        # 于是「只有前几条 arXiv 有中转按钮」）。所以再放一条路：凡是
+        # **我们自己的开放获取接口**（OpenAlex 的 oa_url、Europe PMC 的
+        # OA 全文、DOAJ、Unpaywall）确认过的 URL，也允许中转。
+        # 这个集合只由服务端写入，访客改不了 —— 依旧不是通用代理。
+        from . import sources as _src
+        if not _src.oa_is_verified(u):
+            raise DlError("这个链接不是我们确认过的开放获取位置，本站不代取。", 403)
+        cap, kind, label = 25 * MB, "pdf", "开放获取"
+        return (urllib.parse.urlunsplit((p.scheme, p.netloc, p.path, p.query, "")),
+                cap, kind, label, _ext(p.path, kind))
     cap, kind, label = hit[1]
     clean = urllib.parse.urlunsplit((p.scheme, p.netloc, p.path, p.query, ""))
     return clean, cap, kind, label, _ext(p.path, kind)
@@ -228,21 +239,19 @@ def _open_upstream(url):
         raise DlError("连源站失败（%s）。" % type(e).__name__, 502)
 
 
-def _stream(resp, dest_tmp, dest, cap, kind, ip):
+def _stream(resp, head, dest_tmp, dest, cap, kind, ip):
     """一边写池子一边吐给访客。异常一律在 finally 里收尾（含并发闸）。"""
     done = False
     fh = None
     n = 0
     try:
-        head = resp.read(8) or b""
-        if kind == "pdf" and not head.startswith(b"%PDF"):
-            raise DlError("源站给的不是 PDF，已中止。", 502)
         if not os.path.isdir(SPOOL_DIR):
             os.makedirs(SPOOL_DIR)
         fh = open(dest_tmp, "wb")
         fh.write(head)
         n = len(head)
-        yield head
+        if head:
+            yield head
         while True:
             chunk = resp.read(CHUNK)
             if not chunk:
@@ -303,9 +312,16 @@ def begin(u, ip):
         if clen and clen.isdigit() and int(clen) > cap:
             resp.close()
             raise DlError("文件超过中转大小上限（%d MB）。" % (cap // MB), 413)
+        # 首字节校验放在**返回之前**：进了流式响应之后再发现不是 PDF，
+        # 客户端只会收到一个 0 字节的 200（实测踩到：开放获取平台给的
+        # 有的是「在线阅读」页，点了就是个空文件）。这里提前判、提前报错。
+        head = resp.read(8) or b""
+        if kind == "pdf" and not head.startswith(b"%PDF"):
+            resp.close()
+            raise DlError("这个链接不是 PDF（多半是阅读页或跳转页），不代取。", 502)
     except Exception:
         _gate.release()
         raise
     tmp = dest + ".tmp"
-    return {"gen": lambda: _stream(resp, tmp, dest, cap, kind, ip),
+    return {"gen": lambda: _stream(resp, head, tmp, dest, cap, kind, ip),
             "ctype": ctype, "filename": fn, "label": label, "hits": "upstream"}
