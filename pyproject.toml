@@ -1,12 +1,12 @@
 [project]
 name = "paper-search-tool"
-version = "1.0.0"
-description = "AI 驱动的论文搜索与整理工具，支持多模型推理融合"
+version = "1.1.0"
+description = "OpenSearch：一句话说需求，多库并行检索，再由 LLM 挑出真正相关的几条"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [{name = "RomanCohort"}]
-keywords = ["paper", "search", "ai", "streamlit", "multi-model"]
+keywords = ["paper", "search", "llm", "arxiv", "europepmc", "openalex", "crossref", "pdb"]
 
 dependencies = [
     "streamlit>=1.32",
