@@ -85,7 +85,10 @@ window.RCO = (function () {
       });
     });
   }
-  return { cid: cid, esc: esc, itemHtml: itemHtml, deadList: deadList, decorate: decorate };
+  // 这里导出的东西才是页面能用的 —— 少写一个就在运行时变成
+  // "R.xxx is not a function"，然后被 fetch 的 .catch 吞成「网络出错了」。
+  return { cid: cid, esc: esc, itemHtml: itemHtml, rowHtml: rowHtml,
+           deadList: deadList, decorate: decorate };
 })();
 </script>
 """
@@ -262,7 +265,7 @@ ASK_JS = u"""
       lab.appendChild(document.createTextNode(' ' + s.label));
       db.appendChild(lab);
     });
-  }).catch(function () { msg.textContent = '数据库清单没取到，稍后再试。'; });
+  }).catch(function (e) { msg.textContent = '数据库清单没取到：' + ((e && e.message) || '网络请求失败'); });
   document.getElementById('dball').addEventListener('click', function () {
     var boxes = db.querySelectorAll('input[type=checkbox]');
     var on = picked().length !== boxes.length;
@@ -301,7 +304,11 @@ ASK_JS = u"""
           + '<a href="' + base + 'ris">RIS</a> · '
           + '<a href="' + base + 'json">JSON</a>';
       })
-      .catch(function () { btn.disabled = false; msg.textContent = '网络出错了。'; });
+      // 别把任何异常都说成「网络出错」——那会把页面自己的 JS 错误藏起来。
+      .catch(function (e) {
+        btn.disabled = false;
+        msg.textContent = '出错了：' + ((e && e.message) || '请求失败');
+      });
   });
 })();
 </script>
